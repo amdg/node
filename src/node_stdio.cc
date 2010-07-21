@@ -137,8 +137,6 @@ static Handle<Value> OpenStdin(const Arguments& args) {
   HandleScope scope;
 
   if (isatty(STDIN_FILENO)) {
-    // XXX selecting on tty fds wont work in windows.
-    // Must ALWAYS make a coupling on shitty platforms.
     stdin_flags = fcntl(STDIN_FILENO, F_GETFL, 0);
     if (stdin_flags == -1) {
       // TODO DRY
@@ -204,8 +202,6 @@ void Stdio::Initialize(v8::Handle<v8::Object> target) {
   HandleScope scope;
 
   if (isatty(STDOUT_FILENO)) {
-    // XXX selecting on tty fds wont work in windows.
-    // Must ALWAYS make a coupling on shitty platforms.
     stdout_flags = fcntl(STDOUT_FILENO, F_GETFL, 0);
     int r = fcntl(STDOUT_FILENO, F_SETFL, stdout_flags | O_NONBLOCK);
   }
