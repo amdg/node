@@ -638,6 +638,7 @@ void Heap::PerformGarbageCollection(AllocationSpace space,
   if (collector == MARK_COMPACTOR) {
     if (FLAG_flush_code) {
       // Flush all potentially unused code.
+      GCTracer::Scope gc_scope(tracer, GCTracer::Scope::MC_FLUSH_CODE);
       FlushCode();
     }
 
@@ -1107,6 +1108,7 @@ inline static HeapObject* MigrateObject(HeapObject* source,
   // Update NewSpace stats if necessary.
   RecordCopiedObject(target);
 #endif
+  HEAP_PROFILE(ObjectMoveEvent(source->address(), target->address()));
 
   return target;
 }
@@ -4104,7 +4106,7 @@ bool Heap::ConfigureHeapDefault() {
 }
 
 
-void Heap::RecordStats(HeapStats* stats) {
+void Heap::RecordStats(HeapStats* stats, bool take_snapshot) {
   *stats->start_marker = 0xDECADE00;
   *stats->end_marker = 0xDECADE01;
   *stats->new_space_size = new_space_.Size();
@@ -4121,6 +4123,23 @@ void Heap::RecordStats(HeapStats* stats) {
   *stats->cell_space_capacity = cell_space_->Capacity();
   *stats->lo_space_size = lo_space_->Size();
   GlobalHandles::RecordStats(stats);
+  *stats->memory_allocator_size = MemoryAllocator::Size();
+  *stats->memory_allocator_capacity =
+      MemoryAllocator::Size() + MemoryAllocator::Available();
+  if (take_snapshot) {
+    HeapIterator iterator;
+    for (HeapObject* obj = iterator.next();
+         obj != NULL;
+         obj = iterator.next()) {
+      // Note: snapshot won't be precise because IsFreeListNode returns true
+      // for any bytearray.
+      if (FreeListNode::IsFreeListNode(obj)) continue;
+      InstanceType type = obj->map()->instance_type();
+      ASSERT(0 <= type && type <= LAST_TYPE);
+      stats->objects_per_type[type]++;
+      stats->size_per_type[type] += obj->Size();
+    }
+  }
 }
 
 
@@ -4840,6 +4859,7 @@ GCTracer::~GCTracer() {
     PrintF("mark=%d ", static_cast<int>(scopes_[Scope::MC_MARK]));
     PrintF("sweep=%d ", static_cast<int>(scopes_[Scope::MC_SWEEP]));
     PrintF("compact=%d ", static_cast<int>(scopes_[Scope::MC_COMPACT]));
+    PrintF("flushcode=%d ", static_cast<int>(scopes_[Scope::MC_FLUSH_CODE]));
 
     PrintF("total_size_before=%d ", start_size_);
     PrintF("total_size_after=%d ", Heap::SizeOfObjects());

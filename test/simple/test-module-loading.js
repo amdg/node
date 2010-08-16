@@ -106,6 +106,51 @@ process.assert(foo.bar.expect === foo.bar.actual);
 assert.equal(require('../fixtures/foo').foo, 'ok',
   'require module with no extension');
 
+// Should not attempt to load a directory
+try {
+  require("../fixtures/empty");
+} catch(err) {
+  assert.equal(err.message, "Cannot find module '../fixtures/empty'");
+}
+
+var asyncRequireDir = false;
+require.async("../fixtures/empty", function (err, a) {
+  assert.ok(err);
+
+  if (err) {
+    asyncRequireDir = true;
+    assert.equal(err.message, "Cannot find module '../fixtures/empty'");
+  }
+});
+
+// Check load order is as expected
+common.debug('load order');
+
+var loadOrder = '../fixtures/module-load-order/',
+    msg       = "Load order incorrect.";
+
+require.registerExtension('.reg',  function(content) { return content; });
+require.registerExtension('.reg2', function(content) { return content; });
+
+assert.equal(require(loadOrder + 'file1').file1, 'file1',            msg);
+assert.equal(require(loadOrder + 'file2').file2, 'file2.js',         msg);
+try {
+  require(loadOrder + 'file3');
+} catch (e) {
+  // Not a real .node module, but we know we require'd the right thing.
+  assert.ok(e.message.match(/file3\.node/));
+}
+assert.equal(require(loadOrder + 'file4').file4, 'file4.reg',        msg);
+assert.equal(require(loadOrder + 'file5').file5, 'file5.reg2',       msg);
+assert.equal(require(loadOrder + 'file6').file6, 'file6/index.js',   msg);
+try {
+  require(loadOrder + 'file7');
+} catch (e) {
+  assert.ok(e.message.match(/file7\/index\.node/));
+}
+assert.equal(require(loadOrder + 'file8').file8, 'file8/index.reg',  msg);
+assert.equal(require(loadOrder + 'file9').file9, 'file9/index.reg2', msg);
+
 process.addListener("exit", function () {
   assert.equal(true, a.A instanceof Function);
   assert.equal("A done", a.A());
@@ -127,6 +172,8 @@ process.addListener("exit", function () {
   assert.equal(true, asyncRun);
 
   assert.equal(true, errorThrownAsync);
+
+  assert.equal(true, asyncRequireDir);
 
   console.log("exit");
 });

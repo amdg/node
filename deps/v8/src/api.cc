@@ -126,7 +126,7 @@ static FatalErrorCallback& GetFatalErrorHandler() {
 
 // When V8 cannot allocated memory FatalProcessOutOfMemory is called.
 // The default fatal error handler is called and execution is stopped.
-void i::V8::FatalProcessOutOfMemory(const char* location) {
+void i::V8::FatalProcessOutOfMemory(const char* location, bool take_snapshot) {
   i::HeapStats heap_stats;
   int start_marker;
   heap_stats.start_marker = &start_marker;
@@ -166,9 +166,17 @@ void i::V8::FatalProcessOutOfMemory(const char* location) {
   heap_stats.near_death_global_handle_count = &near_death_global_handle_count;
   int destroyed_global_handle_count;
   heap_stats.destroyed_global_handle_count = &destroyed_global_handle_count;
+  int memory_allocator_size;
+  heap_stats.memory_allocator_size = &memory_allocator_size;
+  int memory_allocator_capacity;
+  heap_stats.memory_allocator_capacity = &memory_allocator_capacity;
+  int objects_per_type[LAST_TYPE + 1] = {0};
+  heap_stats.objects_per_type = objects_per_type;
+  int size_per_type[LAST_TYPE + 1] = {0};
+  heap_stats.size_per_type = size_per_type;
   int end_marker;
   heap_stats.end_marker = &end_marker;
-  i::Heap::RecordStats(&heap_stats);
+  i::Heap::RecordStats(&heap_stats, take_snapshot);
   i::V8::SetFatalError();
   FatalErrorCallback callback = GetFatalErrorHandler();
   {
@@ -4561,6 +4569,12 @@ Handle<String> HeapGraphNode::GetName() const {
 }
 
 
+uint64_t HeapGraphNode::GetId() const {
+  IsDeadCheck("v8::HeapGraphNode::GetId");
+  return reinterpret_cast<const i::HeapEntry*>(this)->id();
+}
+
+
 int HeapGraphNode::GetSelfSize() const {
   IsDeadCheck("v8::HeapGraphNode::GetSelfSize");
   return reinterpret_cast<const i::HeapEntry*>(this)->self_size();
@@ -4624,6 +4638,22 @@ const HeapGraphPath* HeapGraphNode::GetRetainingPath(int index) const {
 }
 
 
+const HeapGraphNode* HeapSnapshotsDiff::GetAdditionsRoot() const {
+  IsDeadCheck("v8::HeapSnapshotsDiff::GetAdditionsRoot");
+  const i::HeapSnapshotsDiff* diff =
+      reinterpret_cast<const i::HeapSnapshotsDiff*>(this);
+  return reinterpret_cast<const HeapGraphNode*>(diff->additions_root());
+}
+
+
+const HeapGraphNode* HeapSnapshotsDiff::GetDeletionsRoot() const {
+  IsDeadCheck("v8::HeapSnapshotsDiff::GetDeletionsRoot");
+  const i::HeapSnapshotsDiff* diff =
+      reinterpret_cast<const i::HeapSnapshotsDiff*>(this);
+  return reinterpret_cast<const HeapGraphNode*>(diff->deletions_root());
+}
+
+
 unsigned HeapSnapshot::GetUid() const {
   IsDeadCheck("v8::HeapSnapshot::GetUid");
   return reinterpret_cast<const i::HeapSnapshot*>(this)->uid();
@@ -4639,11 +4669,23 @@ Handle<String> HeapSnapshot::GetTitle() const {
 }
 
 
-const HeapGraphNode* HeapSnapshot::GetHead() const {
+const HeapGraphNode* HeapSnapshot::GetRoot() const {
   IsDeadCheck("v8::HeapSnapshot::GetHead");
   const i::HeapSnapshot* snapshot =
       reinterpret_cast<const i::HeapSnapshot*>(this);
   return reinterpret_cast<const HeapGraphNode*>(snapshot->const_root());
+}
+
+
+const HeapSnapshotsDiff* HeapSnapshot::CompareWith(
+    const HeapSnapshot* snapshot) const {
+  IsDeadCheck("v8::HeapSnapshot::CompareWith");
+  i::HeapSnapshot* snapshot1 = const_cast<i::HeapSnapshot*>(
+      reinterpret_cast<const i::HeapSnapshot*>(this));
+  i::HeapSnapshot* snapshot2 = const_cast<i::HeapSnapshot*>(
+      reinterpret_cast<const i::HeapSnapshot*>(snapshot));
+  return reinterpret_cast<const HeapSnapshotsDiff*>(
+      snapshot1->CompareWith(snapshot2));
 }
 
 

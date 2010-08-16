@@ -783,6 +783,8 @@ enum encoding ParseEncoding(Handle<Value> encoding_v, enum encoding _default) {
     return UTF8;
   } else if (strcasecmp(*encoding, "ascii") == 0) {
     return ASCII;
+  } else if (strcasecmp(*encoding, "base64") == 0) {
+    return BASE64;
   } else if (strcasecmp(*encoding, "binary") == 0) {
     return BINARY;
   } else if (strcasecmp(*encoding, "raw") == 0) {
@@ -902,7 +904,7 @@ static void ReportException(TryCatch &try_catch, bool show_line) {
   Handle<Message> message = try_catch.Message();
 
   node::Stdio::DisableRawMode(STDIN_FILENO);
-  fprintf(stderr, "\n\n");
+  fprintf(stderr, "\n");
 
   if (show_line && !message.IsEmpty()) {
     // Print (filename):(line number): (message).
@@ -924,7 +926,7 @@ static void ReportException(TryCatch &try_catch, bool show_line) {
     //
     // When reporting errors on the first line of a script, this wrapper
     // function is leaked to the user. This HACK is to remove it. The length
-    // of the wrapper is 62. That wrapper is defined in lib/module.js
+    // of the wrapper is 62. That wrapper is defined in src/node.js
     //
     // If that wrapper is ever changed, then this number also has to be
     // updated. Or - someone could clean this up so that the two peices
@@ -1424,7 +1426,6 @@ void FatalException(TryCatch &try_catch) {
 
 
 static ev_async debug_watcher;
-volatile static bool debugger_msg_pending = false;
 
 static void DebugMessageCallback(EV_P_ ev_async *watcher, int revents) {
   HandleScope scope;
@@ -1439,48 +1440,13 @@ static void DebugMessageDispatch(void) {
 
   // Send a signal to our main thread saying that it should enter V8 to
   // handle the message.
-  debugger_msg_pending = true;
   ev_async_send(EV_DEFAULT_UC_ &debug_watcher);
 }
 
-static Handle<Value> CheckBreak(const Arguments& args) {
-  HandleScope scope;
-  assert(args.Length() == 0);
-
-  // TODO FIXME This function is a hack to wait until V8 is ready to accept
-  // commands. There seems to be a bug in EnableAgent( _ , _ , true) which
-  // makes it unusable here. Ideally we'd be able to bind EnableAgent and
-  // get it to halt until Eclipse connects.
-
-  if (!debug_wait_connect)
-    return Undefined();
-
-  printf("Waiting for remote debugger connection...\n");
-
-  const int halfSecond = 50;
-  const int tenMs=10000;
-  debugger_msg_pending = false;
-  for (;;) {
-    if (debugger_msg_pending) {
-      Debug::DebugBreak();
-      Debug::ProcessDebugMessages();
-      debugger_msg_pending = false;
-
-      // wait for 500 msec of silence from remote debugger
-      int cnt = halfSecond;
-        while (cnt --) {
-        debugger_msg_pending = false;
-        usleep(tenMs);
-        if (debugger_msg_pending) {
-          debugger_msg_pending = false;
-          cnt = halfSecond;
-        }
-      }
-      break;
-    }
-    usleep(tenMs);
-  }
-  return Undefined();
+static void DebugBreakMessageHandler(const Debug::Message& message) {
+  // do nothing with debug messages.
+  // The message handler will get changed by DebuggerAgent::CreateSession in
+  // debug-agent.cc of v8/src when a new session is created
 }
 
 Persistent<Object> binding_cache;
@@ -1530,7 +1496,6 @@ static Handle<Value> Binding(const Arguments& args) {
     exports->Set(String::New("url"),          String::New(native_url));
     exports->Set(String::New("utils"),        String::New(native_utils));
     exports->Set(String::New("path"),         String::New(native_path));
-    exports->Set(String::New("module"),       String::New(native_module));
     exports->Set(String::New("string_decoder"), String::New(native_string_decoder));
     binding_cache->Set(module, exports);
   } else {
@@ -1541,6 +1506,24 @@ static Handle<Value> Binding(const Arguments& args) {
 }
 
 
+static Handle<Value> ProcessTitleGetter(Local<String> property,
+                                        const AccessorInfo& info) {
+  HandleScope scope;
+  int len;
+  const char *s = OS::GetProcessTitle(&len);
+  return scope.Close(s ? String::New(s, len) : String::Empty());
+}
+
+
+static void ProcessTitleSetter(Local<String> property,
+                               Local<Value> value,
+                               const AccessorInfo& info) {
+  HandleScope scope;
+  String::Utf8Value title(value->ToString());
+  OS::SetProcessTitle(*title);
+}
+
+
 static void Load(int argc, char *argv[]) {
   HandleScope scope;
 
@@ -1548,6 +1531,12 @@ static void Load(int argc, char *argv[]) {
   node::EventEmitter::Initialize(process_template);
 
   process = Persistent<Object>::New(process_template->GetFunction()->NewInstance());
+
+
+  process->SetAccessor(String::New("title"),
+                       ProcessTitleGetter,
+                       ProcessTitleSetter);
+
 
   // Add a reference to the global object
   Local<Object> global = v8::Context::GetCurrent()->Global();
@@ -1624,7 +1613,6 @@ static void Load(int argc, char *argv[]) {
   NODE_SET_METHOD(process, "dlopen", DLOpen);
   NODE_SET_METHOD(process, "kill", Kill);
   NODE_SET_METHOD(process, "memoryUsage", MemoryUsage);
-  NODE_SET_METHOD(process, "checkBreak", CheckBreak);
 
   NODE_SET_METHOD(process, "binding", Binding);
 
@@ -1769,11 +1757,27 @@ static void AtExit() {
 
 
 int main(int argc, char *argv[]) {
+  // Hack aroung with the argv pointer. Used for process.title = "blah".
+  argv = node::OS::SetupArgs(argc, argv);
+
   // Parse a few arguments which are specific to Node.
   node::ParseArgs(&argc, argv);
   // Parse the rest of the args (up to the 'option_end_index' (where '--' was
   // in the command line))
-  V8::SetFlagsFromCommandLine(&node::option_end_index, argv, false);
+  int v8argc = node::option_end_index;
+  char **v8argv = argv;
+
+  if (node::debug_wait_connect) {
+    // v8argv is a copy of argv up to the script file argument +2 if --debug-brk
+    // to expose the v8 debugger js object so that node.js can set
+    // a breakpoint on the first line of the startup script
+    v8argc += 2;
+    v8argv = new char*[v8argc];
+    memcpy(v8argv, argv, sizeof(argv) * node::option_end_index);
+    v8argv[node::option_end_index] = const_cast<char*>("--expose_debug_as");
+    v8argv[node::option_end_index + 1] = const_cast<char*>("v8debug");
+  }
+  V8::SetFlagsFromCommandLine(&v8argc, v8argv, false);
 
   // Ignore SIGPIPE
   struct sigaction sa;
@@ -1783,10 +1787,12 @@ int main(int argc, char *argv[]) {
 
 
   // Initialize the default ev loop.
-#ifdef __sun
+#if defined(__sun)
   // TODO(Ryan) I'm experiencing abnormally high load using Solaris's
   // EVBACKEND_PORT. Temporarally forcing select() until I debug.
   ev_default_loop(EVBACKEND_POLL);
+#elif defined(__APPLE_CC__) && __APPLE_CC__ >= 5659
+  ev_default_loop(EVBACKEND_KQUEUE);
 #else
   ev_default_loop(EVFLAG_AUTO);
 #endif
@@ -1847,6 +1853,13 @@ int main(int argc, char *argv[]) {
 
     // Start the debug thread and it's associated TCP server on port 5858.
     bool r = Debug::EnableAgent("node " NODE_VERSION, node::debug_port);
+    if (node::debug_wait_connect) {
+      // Set up an empty handler so v8 will not continue until a debugger
+      // attaches. This is the same behavior as Debug::EnableAgent(_,_,true)
+      // except we don't break at the beginning of the script.
+      // see Debugger::StartAgent in debug.cc of v8/src
+      Debug::SetMessageHandler2(node::DebugBreakMessageHandler);
+    }
 
     // Crappy check that everything went well. FIXME
     assert(r);

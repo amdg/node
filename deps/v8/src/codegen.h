@@ -80,25 +80,6 @@ enum UnaryOverwriteMode { UNARY_OVERWRITE, UNARY_NO_OVERWRITE };
 // Types of uncatchable exceptions.
 enum UncatchableExceptionType { OUT_OF_MEMORY, TERMINATION };
 
-
-#if V8_TARGET_ARCH_IA32
-#include "ia32/codegen-ia32.h"
-#elif V8_TARGET_ARCH_X64
-#include "x64/codegen-x64.h"
-#elif V8_TARGET_ARCH_ARM
-#include "arm/codegen-arm.h"
-#elif V8_TARGET_ARCH_MIPS
-#include "mips/codegen-mips.h"
-#else
-#error Unsupported target architecture.
-#endif
-
-#include "register-allocator.h"
-
-namespace v8 {
-namespace internal {
-
-
 #define INLINE_RUNTIME_FUNCTION_LIST(F) \
   F(IsSmi, 1, 1)                                                             \
   F(IsNonNegativeSmi, 1, 1)                                                  \
@@ -120,6 +101,7 @@ namespace internal {
   F(IsObject, 1, 1)                                                          \
   F(IsFunction, 1, 1)                                                        \
   F(IsUndetectableObject, 1, 1)                                              \
+  F(IsSpecObject, 1, 1)                                            \
   F(StringAdd, 2, 1)                                                         \
   F(SubString, 3, 1)                                                         \
   F(StringCompare, 2, 1)                                                     \
@@ -131,8 +113,26 @@ namespace internal {
   F(MathPow, 2, 1)                                                           \
   F(MathSin, 1, 1)                                                           \
   F(MathCos, 1, 1)                                                           \
-  F(MathSqrt, 1, 1)
+  F(MathSqrt, 1, 1)                                                          \
+  F(IsRegExpEquivalent, 2, 1)
 
+
+#if V8_TARGET_ARCH_IA32
+#include "ia32/codegen-ia32.h"
+#elif V8_TARGET_ARCH_X64
+#include "x64/codegen-x64.h"
+#elif V8_TARGET_ARCH_ARM
+#include "arm/codegen-arm.h"
+#elif V8_TARGET_ARCH_MIPS
+#include "mips/codegen-mips.h"
+#else
+#error Unsupported target architecture.
+#endif
+
+#include "register-allocator.h"
+
+namespace v8 {
+namespace internal {
 
 // Support for "structured" code comments.
 #ifdef DEBUG
@@ -179,7 +179,6 @@ class CodeGeneratorScope BASE_EMBEDDED {
   static CodeGenerator* top_;
   CodeGenerator* previous_;
 };
-
 
 #if V8_TARGET_ARCH_IA32 || V8_TARGET_ARCH_X64
 
