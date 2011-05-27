@@ -35,6 +35,7 @@
 #include "compilation-cache.h"
 #include "compiler.h"
 #include "debug.h"
+#include "deoptimizer.h"
 #include "execution.h"
 #include "global-handles.h"
 #include "ic.h"
@@ -140,7 +141,9 @@ void BreakLocationIterator::Next() {
       Address target = original_rinfo()->target_address();
       Code* code = Code::GetCodeFromTargetAddress(target);
       if ((code->is_inline_cache_stub() &&
-           code->kind() != Code::BINARY_OP_IC) ||
+           !code->is_binary_op_stub() &&
+           !code->is_type_recording_binary_op_stub() &&
+           !code->is_compare_ic_stub()) ||
           RelocInfo::IsConstructCall(rmode())) {
         break_point_++;
         return;
@@ -461,6 +464,8 @@ void BreakLocationIterator::SetDebugBreakAtIC() {
       KeyedStoreIC::ClearInlinedVersion(pc());
     } else if (code->is_load_stub()) {
       LoadIC::ClearInlinedVersion(pc());
+    } else if (code->is_store_stub()) {
+      StoreIC::ClearInlinedVersion(pc());
     }
   }
 }
@@ -549,6 +554,7 @@ void Debug::ThreadInit() {
   thread_local_.after_break_target_ = 0;
   thread_local_.debugger_entry_ = NULL;
   thread_local_.pending_interrupts_ = 0;
+  thread_local_.restarter_frame_function_pointer_ = NULL;
 }
 
 
@@ -582,12 +588,41 @@ int Debug::ArchiveSpacePerThread() {
 }
 
 
+// Frame structure (conforms InternalFrame structure):
+//   -- code
+//   -- SMI maker
+//   -- function (slot is called "context")
+//   -- frame base
+Object** Debug::SetUpFrameDropperFrame(StackFrame* bottom_js_frame,
+                                       Handle<Code> code) {
+  ASSERT(bottom_js_frame->is_java_script());
+
+  Address fp = bottom_js_frame->fp();
+
+  // Move function pointer into "context" slot.
+  Memory::Object_at(fp + StandardFrameConstants::kContextOffset) =
+      Memory::Object_at(fp + JavaScriptFrameConstants::kFunctionOffset);
+
+  Memory::Object_at(fp + InternalFrameConstants::kCodeOffset) = *code;
+  Memory::Object_at(fp + StandardFrameConstants::kMarkerOffset) =
+      Smi::FromInt(StackFrame::INTERNAL);
+
+  return reinterpret_cast<Object**>(&Memory::Object_at(
+      fp + StandardFrameConstants::kContextOffset));
+}
+
+const int Debug::kFrameDropperFrameSize = 4;
+
+
+
+
+
 // Default break enabled.
 bool Debug::disable_break_ = false;
 
 // Default call debugger on uncaught exception.
 bool Debug::break_on_exception_ = false;
-bool Debug::break_on_uncaught_exception_ = true;
+bool Debug::break_on_uncaught_exception_ = false;
 
 Handle<Context> Debug::debug_context_ = Handle<Context>();
 Code* Debug::debug_break_return_ = NULL;
@@ -800,7 +835,10 @@ bool Debug::Load() {
   // Expose the builtins object in the debugger context.
   Handle<String> key = Factory::LookupAsciiSymbol("builtins");
   Handle<GlobalObject> global = Handle<GlobalObject>(context->global());
-  SetProperty(global, key, Handle<Object>(global->builtins()), NONE);
+  RETURN_IF_EMPTY_HANDLE_VALUE(
+      SetProperty(global, key, Handle<Object>(global->builtins()),
+                  NONE, kNonStrictMode),
+      false);
 
   // Compile the JavaScript for the debugger in the debugger context.
   Debugger::set_compiling_natives(true);
@@ -823,7 +861,7 @@ bool Debug::Load() {
   if (caught_exception) return false;
 
   // Debugger loaded.
-  debug_context_ = Handle<Context>::cast(GlobalHandles::Create(*context));
+  debug_context_ = context;
 
   return true;
 }
@@ -852,8 +890,8 @@ void Debug::PreemptionWhileInDebugger() {
 
 
 void Debug::Iterate(ObjectVisitor* v) {
-  v->VisitPointer(BitCast<Object**, Code**>(&(debug_break_return_)));
-  v->VisitPointer(BitCast<Object**, Code**>(&(debug_break_slot_)));
+  v->VisitPointer(BitCast<Object**>(&(debug_break_return_)));
+  v->VisitPointer(BitCast<Object**>(&(debug_break_slot_)));
 }
 
 
@@ -975,17 +1013,18 @@ Handle<Object> Debug::CheckBreakPoints(Handle<Object> break_point_objects) {
     for (int i = 0; i < array->length(); i++) {
       Handle<Object> o(array->get(i));
       if (CheckBreakPoint(o)) {
-        break_points_hit->SetElement(break_points_hit_count++, *o);
+        SetElement(break_points_hit, break_points_hit_count++, o);
       }
     }
   } else {
     if (CheckBreakPoint(break_point_objects)) {
-      break_points_hit->SetElement(break_points_hit_count++,
-                                   *break_point_objects);
+      SetElement(break_points_hit,
+                 break_points_hit_count++,
+                 break_point_objects);
     }
   }
 
-  // Return undefined if no break points where triggered.
+  // Return undefined if no break points were triggered.
   if (break_points_hit_count == 0) {
     return Factory::undefined_value();
   }
@@ -1001,10 +1040,12 @@ bool Debug::CheckBreakPoint(Handle<Object> break_point_object) {
   if (!break_point_object->IsJSObject()) return true;
 
   // Get the function CheckBreakPoint (defined in debug.js).
+  Handle<String> is_break_point_triggered_symbol =
+      Factory::LookupAsciiSymbol("IsBreakPointTriggered");
   Handle<JSFunction> check_break_point =
     Handle<JSFunction>(JSFunction::cast(
-      debug_context()->global()->GetProperty(
-          *Factory::LookupAsciiSymbol("IsBreakPointTriggered"))));
+        debug_context()->global()->GetPropertyNoExceptionThrown(
+            *is_break_point_triggered_symbol)));
 
   // Get the break id as an object.
   Handle<Object> break_id = Factory::NewNumberFromInt(Debug::break_id());
@@ -1163,6 +1204,15 @@ void Debug::ChangeBreakOnException(ExceptionBreakType type, bool enable) {
     break_on_uncaught_exception_ = enable;
   } else {
     break_on_exception_ = enable;
+  }
+}
+
+
+bool Debug::IsBreakOnException(ExceptionBreakType type) {
+  if (type == BreakUncaughtException) {
+    return break_on_uncaught_exception_;
+  } else {
+    return break_on_exception_;
   }
 }
 
@@ -1411,7 +1461,7 @@ bool Debug::IsDebugBreak(Address addr) {
 // Check whether a code stub with the specified major key is a possible break
 // point location when looking for source break locations.
 bool Debug::IsSourceBreakStub(Code* code) {
-  CodeStub::Major major_key = code->major_key();
+  CodeStub::Major major_key = CodeStub::GetMajorKey(code);
   return major_key == CodeStub::CallFunction;
 }
 
@@ -1419,9 +1469,8 @@ bool Debug::IsSourceBreakStub(Code* code) {
 // Check whether a code stub with the specified major key is a possible break
 // location.
 bool Debug::IsBreakStub(Code* code) {
-  CodeStub::Major major_key = code->major_key();
-  return major_key == CodeStub::CallFunction ||
-         major_key == CodeStub::StackCheck;
+  CodeStub::Major major_key = CodeStub::GetMajorKey(code);
+  return major_key == CodeStub::CallFunction;
 }
 
 
@@ -1459,8 +1508,7 @@ Handle<Code> Debug::FindDebugBreak(Handle<Code> code, RelocInfo::Mode mode) {
     return result;
   }
   if (code->kind() == Code::STUB) {
-    ASSERT(code->major_key() == CodeStub::CallFunction ||
-           code->major_key() == CodeStub::StackCheck);
+    ASSERT(code->major_key() == CodeStub::CallFunction);
     Handle<Code> result =
         Handle<Code>(Builtins::builtin(Builtins::StubNoRegisters_DebugBreak));
     return result;
@@ -1618,6 +1666,12 @@ bool Debug::EnsureDebugInfo(Handle<SharedFunctionInfo> shared) {
 
   // Ensure shared in compiled. Return false if this failed.
   if (!EnsureCompiled(shared, CLEAR_EXCEPTION)) return false;
+
+  // If preparing for the first break point make sure to deoptimize all
+  // functions as debugging does not work with optimized code.
+  if (!has_break_points_) {
+    Deoptimizer::DeoptimizeAll();
+  }
 
   // Create the debug info object.
   Handle<DebugInfo> debug_info = Factory::NewDebugInfo(shared);
@@ -1797,13 +1851,15 @@ bool Debug::IsDebugGlobal(GlobalObject* global) {
 
 
 void Debug::ClearMirrorCache() {
+  PostponeInterruptsScope postpone;
   HandleScope scope;
   ASSERT(Top::context() == *Debug::debug_context());
 
   // Clear the mirror cache.
   Handle<String> function_name =
       Factory::LookupSymbol(CStrVector("ClearMirrorCache"));
-  Handle<Object> fun(Top::global()->GetProperty(*function_name));
+  Handle<Object> fun(Top::global()->GetPropertyNoExceptionThrown(
+      *function_name));
   ASSERT(fun->IsJSFunction());
   bool caught_exception;
   Handle<Object> js_object = Execution::TryCall(
@@ -1910,7 +1966,8 @@ Handle<Object> Debugger::MakeJSObject(Vector<const char> constructor_name,
 
   // Create the execution state object.
   Handle<String> constructor_str = Factory::LookupSymbol(constructor_name);
-  Handle<Object> constructor(Top::global()->GetProperty(*constructor_str));
+  Handle<Object> constructor(Top::global()->GetPropertyNoExceptionThrown(
+      *constructor_str));
   ASSERT(constructor->IsJSFunction());
   if (!constructor->IsJSFunction()) {
     *caught_exception = true;
@@ -2134,9 +2191,11 @@ void Debugger::OnAfterCompile(Handle<Script> script,
   // script. Make sure that these break points are set.
 
   // Get the function UpdateScriptBreakPoints (defined in debug-debugger.js).
+  Handle<String> update_script_break_points_symbol =
+      Factory::LookupAsciiSymbol("UpdateScriptBreakPoints");
   Handle<Object> update_script_break_points =
-      Handle<Object>(Debug::debug_context()->global()->GetProperty(
-          *Factory::LookupAsciiSymbol("UpdateScriptBreakPoints")));
+      Handle<Object>(Debug::debug_context()->global()->
+          GetPropertyNoExceptionThrown(*update_script_break_points_symbol));
   if (!update_script_break_points->IsJSFunction()) {
     return;
   }
@@ -2684,8 +2743,10 @@ bool Debugger::StartAgent(const char* name, int port,
   }
 
   if (Socket::Setup()) {
-    agent_ = new DebuggerAgent(name, port);
-    agent_->Start();
+    if (agent_ == NULL) {
+      agent_ = new DebuggerAgent(name, port);
+      agent_->Start();
+    }
     return true;
   }
 
@@ -2981,7 +3042,8 @@ void LockingCommandMessageQueue::Clear() {
 
 
 MessageDispatchHelperThread::MessageDispatchHelperThread()
-    : sem_(OS::CreateSemaphore(0)), mutex_(OS::CreateMutex()),
+    : Thread("v8:MsgDispHelpr"),
+      sem_(OS::CreateSemaphore(0)), mutex_(OS::CreateMutex()),
       already_signalled_(false) {
 }
 

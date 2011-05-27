@@ -139,6 +139,22 @@ class VirtualFrame: public ZoneObject {
     if (is_used(reg)) SpillElementAt(register_location(reg));
   }
 
+  // Make the two registers distinct and spill them.  Returns the second
+  // register.  If the registers were not distinct then it returns the new
+  // second register.
+  Result MakeDistinctAndSpilled(Result* left, Result* right) {
+    Spill(left->reg());
+    Spill(right->reg());
+    if (left->reg().is(right->reg())) {
+      RegisterAllocator* allocator = cgen()->allocator();
+      Result fresh = allocator->Allocate();
+      ASSERT(fresh.is_valid());
+      masm()->mov(fresh.reg(), right->reg());
+      return fresh;
+    }
+    return *right;
+  }
+
   // Spill all occurrences of an arbitrary register if possible.  Return the
   // register spilled or no_reg if it was not possible to free any register
   // (ie, they all have frame-external references).
@@ -349,11 +365,12 @@ class VirtualFrame: public ZoneObject {
 
   // Call store IC.  If the load is contextual, value is found on top of the
   // frame.  If not, value and receiver are on the frame.  Both are dropped.
-  Result CallStoreIC(Handle<String> name, bool is_contextual);
+  Result CallStoreIC(Handle<String> name, bool is_contextual,
+                     StrictModeFlag strict_mode);
 
   // Call keyed store IC.  Value, key, and receiver are found on top
   // of the frame.  All three are dropped.
-  Result CallKeyedStoreIC();
+  Result CallKeyedStoreIC(StrictModeFlag strict_mode);
 
   // Call call IC.  Function name, arguments, and receiver are found on top
   // of the frame and dropped by the call.  The argument count does not
@@ -402,9 +419,11 @@ class VirtualFrame: public ZoneObject {
   void EmitPush(Immediate immediate,
                 TypeInfo info = TypeInfo::Unknown());
 
+  inline bool ConstantPoolOverflowed();
+
   // Push an element on the virtual frame.
+  void Push(Handle<Object> value);
   inline void Push(Register reg, TypeInfo info = TypeInfo::Unknown());
-  inline void Push(Handle<Object> value);
   inline void Push(Smi* value);
 
   void PushUntaggedElement(Handle<Object> value);

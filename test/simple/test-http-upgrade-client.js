@@ -1,77 +1,77 @@
+// Copyright Joyent, Inc. and other Node contributors.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit
+// persons to whom the Software is furnished to do so, subject to the
+// following conditions:
+//
+// The above copyright notice and this permission notice shall be included
+// in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+// NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+// USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 // Verify that the 'upgrade' header causes an 'upgrade' event to be emitted to
 // the HTTP client. This test uses a raw TCP server to better control server
 // behavior.
 
-common = require("../common");
-assert = common.assert
+var common = require('../common');
+var assert = require('assert');
 
 var http = require('http');
 var net = require('net');
 
-// Parse a string of data, returning an object if headers are complete, and
-// undefined otherwise
-var parseHeaders = function(data) {
-    var m = data.search(/\r\n\r\n/);
-    if (!m) {
-        return;
-    }
-
-    var o = {};
-    data.substring(0, m.index).split('\r\n').forEach(function(h) {
-        var foo = h.split(':');
-        if (foo.length < 2) {
-            return;
-        }
-
-        o[foo[0].trim().toLowerCase()] = foo[1].trim().toLowerCase();
-    });
-
-    return o;
-};
-
 // Create a TCP server
 var srv = net.createServer(function(c) {
-    var data = '';
-    c.addListener('data', function(d) {
-        data += d.toString('utf8');
+  var data = '';
+  c.addListener('data', function(d) {
+    data += d.toString('utf8');
 
-        // We found the end of the headers; make sure that we have an 'upgrade'
-        // header and send back a response
-        var headers = parseHeaders(data);
-        if (!headers) {
-            return;
-        }
+    c.write('HTTP/1.1 101\r\n');
+    c.write('hello: world\r\n');
+    c.write('connection: upgrade\r\n');
+    c.write('upgrade: websocket\r\n');
+    c.write('\r\n');
+    c.write('nurtzo');
+  });
 
-        assert.ok('upgrade' in headers);
-
-        c.write('HTTP/1.1 101\r\n');
-        c.write('connection: upgrade\r\n');
-        c.write('upgrade: ' + headers.upgrade + '\r\n');
-        c.write('\r\n');
-        c.write('nurtzo');
-
-        c.end();
-    });
+  c.addListener('end', function() {
+    c.end();
+  });
 });
-srv.listen(common.PORT, '127.0.0.1');
 
 var gotUpgrade = false;
-var hc = http.createClient(common.PORT, '127.0.0.1');
-hc.addListener('upgrade', function(req, socket, upgradeHead) {
+
+srv.listen(common.PORT, '127.0.0.1', function() {
+
+  var hc = http.createClient(common.PORT, '127.0.0.1');
+  hc.addListener('upgrade', function(res, socket, upgradeHead) {
     // XXX: This test isn't fantastic, as it assumes that the entire response
     //      from the server will arrive in a single data callback
     assert.equal(upgradeHead, 'nurtzo');
+
+    console.log(res.headers);
+    var expectedHeaders = {'hello': 'world',
+                            'connection': 'upgrade',
+                            'upgrade': 'websocket' };
+    assert.deepEqual(expectedHeaders, res.headers);
 
     socket.end();
     srv.close();
 
     gotUpgrade = true;
+  });
+  hc.request('GET', '/').end();
 });
-hc.request('/', {
-    'Connection' : 'Upgrade',
-    'Upgrade' : 'WebSocket'
-}).end();
 
 process.addListener('exit', function() {
-    assert.ok(gotUpgrade);
+  assert.ok(gotUpgrade);
 });
